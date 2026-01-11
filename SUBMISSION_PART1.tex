@@ -1,0 +1,428 @@
+\documentclass[11pt,a4paper]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage[margin=1in]{geometry}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+
+% Code listing style
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=2,
+    frame=single
+}
+\lstset{style=mystyle}
+
+% Header/Footer
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{DSAIT4105 - Probabilistic Models and Inference}
+\lhead{Part I: Problem Library}
+\rfoot{Page \thepage}
+
+% Title
+\title{\textbf{Probabilistic Models and Inference}\\[0.5em]
+\Large Part I: Problem Library Submission}
+\author{[Your Name]}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This submission presents two simulation-based inference problems designed to stress test standard inference procedures. The models focus on physics domains: (1) a \textbf{Projectile/Artillery Model} demonstrating multimodality and parameter correlation challenges, and (2) a \textbf{Double Pendulum Model} demonstrating chaotic dynamics that break gradient-based inference. Both models are implemented in Gen.jl with full probabilistic programs and theoretical analysis of inference procedure performance.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%==============================================================================
+\section{Model 1: Projectile/Artillery Trajectory Inference}
+%==============================================================================
+
+\subsection{Problem Statement}
+
+Given noisy observations of where a projectile lands, infer the initial velocity $v_0$ and launch angle $\theta$ used to fire it. This is a classic inverse problem in ballistics with applications in artillery targeting, sports analytics, and forensic trajectory reconstruction.
+
+\subsection{Simulator Description}
+
+The simulator implements 2D ballistic motion under gravity. The trajectory equations are:
+
+\begin{align}
+x(t) &= x_0 + v_0 \cos(\theta) \cdot t \\
+y(t) &= y_0 + v_0 \sin(\theta) \cdot t - \frac{1}{2}gt^2
+\end{align}
+
+The impact position (where $y = 0$) can be computed analytically:
+\begin{equation}
+x_{\text{impact}} = \frac{v_0^2 \sin(2\theta)}{g}
+\end{equation}
+
+\textbf{Inputs:}
+\begin{itemize}
+    \item $v_0$: Initial velocity (m/s)
+    \item $\theta$: Launch angle (radians)
+\end{itemize}
+
+\textbf{Output:}
+\begin{itemize}
+    \item Impact position (x-coordinate where $y = 0$)
+\end{itemize}
+
+The simulator executes in milliseconds, well under the recommended few-seconds threshold.
+
+\subsection{Probabilistic Model}
+
+\begin{lstlisting}[language=Python, caption={Gen.jl probabilistic model for projectile inference}]
+@gen function projectile_model(observed_impacts, noise_std)
+    # Priors
+    v0 = ({:v0} ~ uniform(10.0, 50.0))      # Initial velocity (m/s)
+    theta = ({:theta} ~ uniform(pi/18, 4*pi/9)) # Angle: 10 to 80 degrees
+
+    # Run simulator
+    x_impact = simulate_projectile(v0, theta)
+
+    # Likelihood: observed impacts are noisy measurements
+    for (i, obs) in enumerate(observed_impacts)
+        {(:impact, i)} ~ normal(x_impact, noise_std)
+    end
+
+    return (v0, theta, x_impact)
+end
+\end{lstlisting}
+
+\subsection{Why This Model Tests Inference}
+
+\subsubsection{Challenge 1: Multimodal Posterior}
+
+The same target distance can be achieved with two different $(v_0, \theta)$ combinations. From the range equation $R = \frac{v_0^2 \sin(2\theta)}{g}$, we see that $\sin(2\theta) = \sin(2(\frac{\pi}{2} - \theta))$, meaning complementary angles achieve the same range:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Solution Type} & \textbf{Angle} & \textbf{Velocity} & \textbf{Trajectory} \\
+\midrule
+Low Arc & $\sim 25°$ & $\sim 35$ m/s & Flat, fast \\
+High Arc & $\sim 65°$ & $\sim 35$ m/s & Tall, slow \\
+\bottomrule
+\end{tabular}
+\caption{Two solutions achieving the same impact distance}
+\end{table}
+
+This creates a \textbf{bimodal posterior} that sampling methods must explore. Methods that get stuck in one mode will underestimate posterior uncertainty.
+
+\subsubsection{Challenge 2: Parameter Correlation}
+
+Velocity and angle trade off: increasing angle requires adjusting velocity to maintain range. Along iso-range curves, we have:
+\begin{equation}
+v_0 = \sqrt{\frac{Rg}{\sin(2\theta)}}
+\end{equation}
+
+This creates elongated, curved posterior regions that are difficult for methods with axis-aligned proposals.
+
+\subsection{Inference Procedure Analysis}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{p{3.5cm}p{2cm}p{8cm}}
+\toprule
+\textbf{Method} & \textbf{Performance} & \textbf{Explanation} \\
+\midrule
+Importance Sampling & POOR & Samples from prior rarely land in either mode. High variance, weight degeneracy. ESS $\ll$ N. \\
+\midrule
+Metropolis-Hastings & MODERATE & Can explore within modes but struggles to jump between them. Correlation slows mixing. \\
+\midrule
+HMC & GOOD & Smooth likelihood allows gradient-based exploration. Efficiently navigates curved posterior geometry. \\
+\midrule
+Particle Filtering & N/A & Problem is not sequential in time. \\
+\bottomrule
+\end{tabular}
+\caption{Theoretical analysis of inference procedures for the projectile model}
+\end{table}
+
+\subsection{Code Location}
+\texttt{models/projectile\_artillery.jl}
+
+%==============================================================================
+\section{Model 2: Double Pendulum Parameter Inference}
+%==============================================================================
+
+\subsection{Problem Statement}
+
+Given noisy observations of a double pendulum's trajectory, infer the physical parameters (lengths, masses) and initial conditions. The double pendulum is a canonical example of a chaotic dynamical system.
+
+\subsection{Simulator Description}
+
+The simulator solves the double pendulum equations of motion using RK4 integration.
+
+\textbf{State:} $[\theta_1, \theta_2, \omega_1, \omega_2]$ (angles and angular velocities)
+
+\textbf{Dynamics:} Derived from Lagrangian mechanics, the angular accelerations are:
+\begin{align}
+\alpha_1 &= \frac{-g(2m_1 + m_2)\sin\theta_1 - m_2 g\sin(\theta_1 - 2\theta_2) - 2\sin(\Delta\theta)m_2(\omega_2^2 L_2 + \omega_1^2 L_1\cos(\Delta\theta))}{L_1(2m_1 + m_2 - m_2\cos(2\Delta\theta))} \\
+\alpha_2 &= \frac{2\sin(\Delta\theta)(\omega_1^2 L_1(m_1 + m_2) + g(m_1 + m_2)\cos\theta_1 + \omega_2^2 L_2 m_2\cos(\Delta\theta))}{L_2(2m_1 + m_2 - m_2\cos(2\Delta\theta))}
+\end{align}
+where $\Delta\theta = \theta_1 - \theta_2$.
+
+\textbf{Inputs:}
+\begin{itemize}
+    \item Physical parameters: $L_1, L_2$ (lengths), $m_1, m_2$ (masses)
+    \item Initial conditions: $\theta_1, \theta_2, \omega_1, \omega_2$
+\end{itemize}
+
+\textbf{Output:}
+\begin{itemize}
+    \item Trajectory of $(x, y)$ positions for both pendulum bobs
+\end{itemize}
+
+\subsection{Probabilistic Model}
+
+\begin{lstlisting}[language=Python, caption={Gen.jl probabilistic model for double pendulum inference}]
+@gen function double_pendulum_model(observed_positions, obs_times, noise_std)
+    # Priors on parameters
+    L1 = ({:L1} ~ uniform(0.5, 1.5))
+    L2 = ({:L2} ~ uniform(0.5, 1.5))
+    m2 = ({:m2} ~ uniform(0.5, 2.0))
+
+    # Priors on initial conditions
+    theta1_init = ({:theta1_init} ~ uniform(-pi, pi))
+    theta2_init = ({:theta2_init} ~ uniform(-pi, pi))
+    omega1_init = ({:omega1_init} ~ normal(0, 0.5))
+    omega2_init = ({:omega2_init} ~ normal(0, 0.5))
+
+    # Run simulator
+    trajectory = simulate_double_pendulum(params, initial_state)
+
+    # Likelihood at observation times
+    for (i, t) in enumerate(obs_times)
+        sim_x, sim_y = trajectory_at_time(trajectory, t)
+        {(:obs_x, i)} ~ normal(sim_x, noise_std)
+        {(:obs_y, i)} ~ normal(sim_y, noise_std)
+    end
+end
+\end{lstlisting}
+
+\subsection{Why This Model Tests Inference}
+
+\subsubsection{Challenge 1: Chaotic Dynamics}
+
+The double pendulum exhibits \textbf{deterministic chaos}:
+\begin{itemize}
+    \item Exponential divergence of nearby trajectories
+    \item Positive Lyapunov exponent
+    \item A $0.0001$ radian perturbation leads to $>1$ meter divergence after 5 seconds
+\end{itemize}
+
+\textbf{Experimental demonstration:}
+\begin{table}[h]
+\centering
+\begin{tabular}{ccc}
+\toprule
+\textbf{Time (s)} & \textbf{Divergence (m)} & \textbf{Amplification} \\
+\midrule
+1.0 & 0.0002 & $2\times$ \\
+2.0 & 0.0013 & $13\times$ \\
+3.0 & 0.1872 & $1,872\times$ \\
+5.0 & 1.1119 & $11,119\times$ \\
+7.0 & 2.9835 & $29,835\times$ \\
+\bottomrule
+\end{tabular}
+\caption{Trajectory divergence from $10^{-4}$ radian perturbation}
+\end{table}
+
+\subsubsection{Challenge 2: Gradient Catastrophe}
+
+Gradients $\partial(\text{output})/\partial(\text{parameters})$ are meaningless in the chaotic regime:
+\begin{itemize}
+    \item Finite differences don't converge
+    \item Sign flips unpredictably
+    \item Magnitude explodes exponentially
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{cc}
+\toprule
+$\varepsilon$ & $\partial x_{\text{final}} / \partial \theta_{1,\text{init}}$ \\
+\midrule
+0.1 & 8.76 \\
+0.01 & 46.68 \\
+0.001 & 583.96 \\
+0.0001 & $-4096.76$ \\
+\bottomrule
+\end{tabular}
+\caption{Finite difference gradients do NOT converge as $\varepsilon \to 0$}
+\end{table}
+
+Gradients fluctuate in both sign and magnitude. This breaks all gradient-based methods including HMC.
+
+\subsubsection{Challenge 3: Fractal Likelihood Surface}
+
+The parameter regions yielding ``good'' trajectories form complex, disconnected sets with fractal-like boundaries. Local search cannot navigate this landscape effectively.
+
+\subsection{Inference Procedure Analysis}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{p{3.5cm}p{2.5cm}p{7.5cm}}
+\toprule
+\textbf{Method} & \textbf{Performance} & \textbf{Explanation} \\
+\midrule
+Importance Sampling & VERY POOR & Prior samples essentially never match observations. All weights on negligible fraction of samples. \\
+\midrule
+Metropolis-Hastings & POOR & Likelihood landscape so rough that most moves rejected. Cannot navigate to good regions. \\
+\midrule
+HMC & FAILS & Gradients are wrong, not just noisy. Leapfrog integrator diverges. Near-zero acceptance rate. \\
+\midrule
+Particle Filtering & POOR & Particles diverge rapidly due to chaos. Collapses to single particle quickly. \\
+\bottomrule
+\end{tabular}
+\caption{Theoretical analysis of inference procedures for the double pendulum model}
+\end{table}
+
+\subsection{This is an Adversarial Test Case}
+
+The double pendulum demonstrates a \textbf{fundamental limitation}: some probabilistic models with valid likelihoods are \textbf{computationally intractable} for standard inference. No standard algorithm can efficiently explore this posterior without problem-specific modifications.
+
+\subsection{Code Location}
+\texttt{models/double\_pendulum.jl}
+
+%==============================================================================
+\section{Comparison Summary}
+%==============================================================================
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Aspect} & \textbf{Projectile} & \textbf{Double Pendulum} \\
+\midrule
+Domain & Games/Physics & Physics \\
+Simulator Type & Closed-form ballistics & ODE integration \\
+Primary Challenge & Multimodality & Chaos \\
+Secondary Challenge & Correlation & Gradient catastrophe \\
+Likelihood Surface & Smooth, multimodal & Rough, fractal \\
+Gradients Useful? & Yes & No \\
+Best Standard Method & HMC & None (all fail) \\
+Difficulty & Moderate & Extreme \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of the two models}
+\end{table}
+
+\subsection{All Four Inference Procedures}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{p{3cm}p{5.5cm}p{5.5cm}}
+\toprule
+\textbf{Procedure} & \textbf{Projectile Model} & \textbf{Double Pendulum Model} \\
+\midrule
+Importance Sampling & POOR - multimodal posterior causes weight degeneracy & VERY POOR - chaos makes matching nearly impossible \\
+\midrule
+Metropolis-Hastings & MODERATE - correlation slows mixing between modes & POOR - rough likelihood causes very low acceptance \\
+\midrule
+HMC & GOOD - smooth gradients enable efficient exploration & FAILS - gradients are meaningless in chaotic regime \\
+\midrule
+Particle Filtering & N/A - not a sequential problem & POOR - chaotic divergence causes rapid particle collapse \\
+\bottomrule
+\end{tabular}
+\caption{Summary of inference procedure performance on both models}
+\end{table}
+
+%==============================================================================
+\section{Conclusions}
+%==============================================================================
+
+\subsection{What We Learned}
+
+\begin{enumerate}
+    \item \textbf{No universal inference algorithm exists.} Each model has characteristics that favor or break different methods.
+
+    \item \textbf{Simulator properties matter.} Smoothness, chaos, and gradient behavior determine which algorithms can work.
+
+    \item \textbf{Multimodality is challenging but manageable.} With methods like HMC or tempered MCMC, multimodal posteriors can be explored.
+
+    \item \textbf{Chaos is fundamentally difficult.} Standard algorithms all fail on chaotic systems. This requires specialized approaches such as ABC, summary statistics, or short-window inference.
+\end{enumerate}
+
+\subsection{For Part II}
+
+Custom inference strategies to explore:
+
+\textbf{Projectile Model:}
+\begin{itemize}
+    \item Custom proposals that respect $v_0$-$\theta$ correlation
+    \item Parallel tempering to jump between modes
+    \item Reparameterization to (range, max\_height) instead of $(v_0, \theta)$
+\end{itemize}
+
+\textbf{Double Pendulum Model:}
+\begin{itemize}
+    \item ABC with trajectory summary statistics
+    \item Short-window inference before chaos dominates
+    \item Likelihood tempering with annealing schedules
+\end{itemize}
+
+%==============================================================================
+\section{Files Included}
+%==============================================================================
+
+\begin{verbatim}
+DSAIT4105-PMI/
+|-- models/
+|   |-- projectile_artillery.jl      # Model 1: Projectile/Artillery
+|   |-- double_pendulum.jl           # Model 2: Double Pendulum
+|-- test_projectile.jl               # Test script for Model 1
+|-- test_double_pendulum.jl          # Test script for Model 2
+|-- SUBMISSION_PART1.tex             # This document
+\end{verbatim}
+
+\textbf{To run tests:}
+\begin{verbatim}
+julia test_projectile.jl
+julia test_double_pendulum.jl
+\end{verbatim}
+
+%==============================================================================
+\section*{References}
+%==============================================================================
+
+\begin{enumerate}
+    \item Gen.jl Documentation: \url{https://www.gen.dev/}
+    \item Strogatz, S. (2015). \textit{Nonlinear Dynamics and Chaos}. Westview Press.
+    \item MacKay, D. (2003). \textit{Information Theory, Inference, and Learning Algorithms}. Cambridge University Press.
+    \item Bishop, C. (2006). \textit{Pattern Recognition and Machine Learning}. Springer.
+\end{enumerate}
+
+\end{document}
